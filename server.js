@@ -4,7 +4,7 @@
 
 require('dotenv').config();
 const express = require('express');
-const mysql = require('mysql2/promise');
+
 const cors = require('cors');
 const path = require('path');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
@@ -18,15 +18,22 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ─── Database Connection Pool ───────────────────────────────────────────────
-const db = mysql.createPool({
-  host: process.env.DB_HOST || 'localhost',
-  port: process.env.DB_PORT || 3306,
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'interview_coach',
-  waitForConnections: true,
-  connectionLimit: 10,
+const { Client } = require("pg");
+
+const db = new Client({
+  host: process.env.DB_HOST,
+  port: process.env.DB_PORT,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  ssl: {
+    rejectUnauthorized: false
+  }
 });
+
+db.connect()
+  .then(() => console.log("PostgreSQL Connected"))
+  .catch(err => console.log(err));
 
 // Test DB on startup
 (async () => {
