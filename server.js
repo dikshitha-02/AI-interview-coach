@@ -39,10 +39,10 @@ db.connect()
 (async () => {
   try {
     await db.query('SELECT 1');
-    console.log('✅ MySQL connected successfully');
+    console.log('✅ PostgreSQL connected successfully');
   } catch (err) {
-    console.error('❌ MySQL connection failed:', err.message);
-    console.error('   Make sure MySQL is running and .env is configured correctly.');
+    console.error('❌ PostgreSQL connection failed:', err.message);
+    console.error('   Make sure PostgreSQL is running and .env is configured correctly.');
   }
 })();
 
@@ -67,19 +67,17 @@ app.post('/api/users', async (req, res) => {
     const { name, email } = req.body;
     if (!name || !email) return res.status(400).json({ error: 'Name and email required' });
 
-    // Check if user exists
-    const [existing] = await db.query('SELECT * FROM users WHERE email = ?', [email]);
-    if (existing.length > 0) {
-      return res.json({ user: existing[0], message: 'Welcome back!' });
+    const existingResult = await db.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (existingResult.rows.length > 0) {
+      return res.json({ user: existingResult.rows[0], message: 'Welcome back!' });
     }
 
-    // Create new user
-    const [result] = await db.query(
-      'INSERT INTO users (name, email) VALUES (?, ?)',
+    const insertResult = await db.query(
+      'INSERT INTO users (name, email) VALUES ($1, $2) RETURNING *',
       [name, email]
     );
-    const [newUser] = await db.query('SELECT * FROM users WHERE id = ?', [result.insertId]);
-    res.status(201).json({ user: newUser[0], message: 'Account created!' });
+    const newUser = insertResult.rows[0];
+    res.status(201).json({ user: newUser, message: 'Account created!' });
   } catch (err) {
     console.error('User error:', err);
     res.status(500).json({ error: 'Database error: ' + err.message });
@@ -92,17 +90,16 @@ app.post('/api/interviews', async (req, res) => {
     const { user_id, job_role } = req.body;
     if (!user_id || !job_role) return res.status(400).json({ error: 'user_id and job_role required' });
 
-    // Verify user exists
-    const [users] = await db.query('SELECT id FROM users WHERE id = ?', [user_id]);
-    if (users.length === 0) return res.status(404).json({ error: 'User not found' });
+    const usersResult = await db.query('SELECT id FROM users WHERE id = $1', [user_id]);
+    if (usersResult.rows.length === 0) return res.status(404).json({ error: 'User not found' });
 
-    const [result] = await db.query(
-      'INSERT INTO interviews (user_id, job_role, status) VALUES (?, ?, "in_progress")',
-      [user_id, job_role]
+    const insertResult = await db.query(
+      'INSERT INTO interviews (user_id, job_role, status) VALUES ($1, $2, $3) RETURNING id',
+      [user_id, job_role, 'in_progress']
     );
 
     res.status(201).json({
-      interview_id: result.insertId,
+      interview_id: insertResult.rows[0].id,
       message: `Interview started for ${job_role}`,
     });
   } catch (err) {
@@ -148,13 +145,11 @@ app.post('/api/responses', async (req, res) => {
       return res.status(400).json({ error: 'interview_id, question_text, and user_answer are required' });
     }
 
-    // Verify interview exists
-    const [interviews] = await db.query('SELECT * FROM interviews WHERE id = ?', [interview_id]);
-    if (interviews.length === 0) return res.status(404).json({ error: 'Interview not found' });
+    const interviewsResult = await db.query('SELECT * FROM interviews WHERE id = $1', [interview_id]);
+    if (interviewsResult.rows.length === 0) return res.status(404).json({ error: 'Interview not found' });
 
-    const jobRole = interviews[0].job_role;
+    const jobRole = interviewsResult.rows[0].job_role;
 
-    // Get AI feedback + score
     const systemPrompt = `You are an expert interviewer evaluating a candidate for a ${jobRole} role.
 Analyze the answer and respond ONLY in this exact JSON format (no extra text):
 {
@@ -168,13 +163,11 @@ Analyze the answer and respond ONLY in this exact JSON format (no extra text):
 
     const rawFeedback = await callGemini(systemPrompt, userMessage);
 
-    // Parse JSON safely
     let parsed;
     try {
       const cleaned = rawFeedback.replace(/```json|```/g, '').trim();
       parsed = JSON.parse(cleaned);
     } catch (parseErr) {
-      // Fallback if JSON parsing fails
       parsed = {
         score: 6,
         feedback: rawFeedback.slice(0, 300),
@@ -186,11 +179,10 @@ Analyze the answer and respond ONLY in this exact JSON format (no extra text):
     const score = Math.min(10, Math.max(1, parseInt(parsed.score) || 6));
     const feedbackText = `${parsed.feedback} | Strength: ${parsed.strengths} | Improve: ${parsed.improvement}`;
 
-    // Save to database
-    const [result] = await db.query(
+    const insertResult = await db.query(
       `INSERT INTO responses 
        (interview_id, question_number, question_text, user_answer, ai_feedback, score, confidence_level) 
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
       [
         interview_id,
         question_number || 1,
@@ -203,7 +195,7 @@ Analyze the answer and respond ONLY in this exact JSON format (no extra text):
     );
 
     res.status(201).json({
-      response_id: result.insertId,
+      response_id: insertResult.rows[0].id,
       score,
       feedback: parsed.feedback,
       strengths: parsed.strengths,
@@ -221,24 +213,23 @@ app.post('/api/interviews/:id/complete', async (req, res) => {
   try {
     const interviewId = req.params.id;
 
-    const [responses] = await db.query(
-      'SELECT score FROM responses WHERE interview_id = ?',
+    const responsesResult = await db.query(
+      'SELECT score FROM responses WHERE interview_id = $1',
       [interviewId]
     );
 
-    if (responses.length === 0) return res.status(400).json({ error: 'No responses found' });
+    if (responsesResult.rows.length === 0) return res.status(400).json({ error: 'No responses found' });
 
-    const avg = responses.reduce((sum, r) => sum + r.score, 0) / responses.length;
+    const avg = responsesResult.rows.reduce((sum, r) => sum + r.score, 0) / responsesResult.rows.length;
     const totalScore = parseFloat(avg.toFixed(2));
 
     await db.query(
-      'UPDATE interviews SET status = "completed", total_score = ?, completed_at = NOW() WHERE id = ?',
-      [totalScore, interviewId]
+      'UPDATE interviews SET status = $1, total_score = $2, completed_at = NOW() WHERE id = $3',
+      ['completed', totalScore, interviewId]
     );
 
-    // Get summary
-    const [allResponses] = await db.query(
-      'SELECT question_number, score, ai_feedback, confidence_level FROM responses WHERE interview_id = ? ORDER BY question_number',
+    const allResponsesResult = await db.query(
+      'SELECT question_number, score, ai_feedback, confidence_level FROM responses WHERE interview_id = $1 ORDER BY question_number',
       [interviewId]
     );
 
@@ -246,7 +237,7 @@ app.post('/api/interviews/:id/complete', async (req, res) => {
       interview_id: interviewId,
       total_score: totalScore,
       grade: getGrade(totalScore),
-      responses: allResponses,
+      responses: allResponsesResult.rows,
       message: 'Interview completed and saved!',
     });
   } catch (err) {
@@ -258,18 +249,18 @@ app.post('/api/interviews/:id/complete', async (req, res) => {
 // GET /api/users/:id/history - Get user's interview history
 app.get('/api/users/:id/history', async (req, res) => {
   try {
-    const [interviews] = await db.query(
+    const interviewsResult = await db.query(
       `SELECT i.id, i.job_role, i.status, i.total_score, i.started_at, i.completed_at,
               COUNT(r.id) as response_count
        FROM interviews i
        LEFT JOIN responses r ON r.interview_id = i.id
-       WHERE i.user_id = ?
+       WHERE i.user_id = $1
        GROUP BY i.id
        ORDER BY i.started_at DESC
        LIMIT 10`,
       [req.params.id]
     );
-    res.json({ interviews });
+    res.json({ interviews: interviewsResult.rows });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
