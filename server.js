@@ -49,7 +49,7 @@ db.connect()
 // ─── Gemini API Helper ───────────────────────────────────────────────────────
 async function callGemini(systemPrompt, userMessage) {
   const model = genAI.getGenerativeModel({
-    model: "gemini-2.5-flash",
+    model: "gemini-1.5-flash",
     systemInstruction: systemPrompt,
   });
 
